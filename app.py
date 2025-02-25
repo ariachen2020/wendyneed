@@ -158,9 +158,14 @@ try:
                         value=f"{current_rate:.2f}%"
                     )
     else:
-        st.warning("FRED API key not found. Unable to display current rate.")
+        # 顯示一個更友好的訊息，並提供解決方案
+        st.info("⚠️ Current rate display is disabled. API key not configured in this environment.")
+        st.markdown("""
+        **Note**: The current rate display is only available in the monitoring system, not in the web interface.
+        Your rate monitoring will still work as scheduled.
+        """)
 except Exception as e:
-    st.warning(f"Unable to fetch current rate: {str(e)}")
+    st.info(f"Current rate display is disabled in this environment.")
 
 # Help section
 with st.expander("ℹ️ How it works"):
