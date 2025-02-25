@@ -2,7 +2,7 @@ name: Interest Rate Monitor
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小時執行
+    - cron: '0 10 * * *'  # 每天上午 10:00 UTC (台灣時間 18:00) 執行
   workflow_dispatch:      # 允許手動觸發
   
 jobs:
