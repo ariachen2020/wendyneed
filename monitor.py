@@ -1,174 +1,145 @@
-import yfinance as yf
 import json
-import os
-import time
-from pathlib import Path
-from datetime import datetime, timedelta
 import logging
-from dotenv import load_dotenv
+import os
+from datetime import datetime
 from email_sender import EmailSender
+from pathlib import Path
 import requests
+from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# Set up logging
+# 設置日誌
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('interest_monitor.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-def load_config():
+def get_current_rate():
+    """從 FRED API 獲取當前利率"""
     try:
-        with open("config.json", "r") as f:
-            config = json.load(f)
-            # Validate required fields
-            required_fields = ['email', 'target_rate', 'condition']
-            if not all(field in config for field in required_fields):
-                raise ValueError("Missing required fields in config.json")
-            return config
-    except FileNotFoundError:
-        logging.error("config.json not found")
-        return None
-    except (json.JSONDecodeError, ValueError) as e:
-        logging.error(f"Configuration error: {str(e)}")
-        return None
-
-def get_current_rate(max_retries=2, base_delay=30):
-    """
-    從 FRED 獲取當前利率，使用緩存機制
-    """
-    # 首先檢查緩存
-    cache_file = "rate_cache.json"
-    try:
-        if os.path.exists(cache_file):
-            with open(cache_file, "r") as f:
-                cache_data = json.load(f)
-                cache_time = datetime.fromisoformat(cache_data['timestamp'])
-                # 如果緩存時間不超過15分鐘，直接使用緩存數據
-                if datetime.now() - cache_time < timedelta(minutes=15):
-                    logging.info(f"使用緩存的利率數據: {cache_data['rate']}%")
-                    return cache_data['rate']
-    except Exception as e:
-        logging.warning(f"讀取緩存失敗: {str(e)}")
-
-    def _get_rate_from_fred():
-        """從 FRED API 獲取利率"""
-        try:
-            # FRED API endpoint
-            url = "https://api.stlouisfed.org/fred/series/observations"
-            params = {
-                'series_id': 'DGS10',  # 10-Year Treasury Rate
-                'api_key': os.getenv('FRED_API_KEY'),
-                'sort_order': 'desc',
-                'limit': 1,
-                'file_type': 'json'
-            }
+        # 載入環境變數
+        load_dotenv()
+        api_key = os.getenv('FRED_API_KEY')
+        
+        if not api_key:
+            logging.error("找不到 FRED API Key")
+            return None
             
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('observations') and len(data['observations']) > 0:
-                    rate = float(data['observations'][0]['value'])
-                    logging.info(f"從 FRED 成功獲取利率: {rate}%")
-                    
-                    # 保存到緩存
-                    cache_data = {
-                        'rate': rate,
-                        'timestamp': datetime.now().isoformat(),
-                        'source': 'FRED'
-                    }
-                    try:
-                        with open(cache_file, "w") as f:
-                            json.dump(cache_data, f)
-                    except Exception as e:
-                        logging.warning(f"保存緩存失敗: {str(e)}")
-                        
+        logging.info("正在從 FRED 獲取利率數據...")
+        
+        # FRED API endpoint
+        url = "https://api.stlouisfed.org/fred/series/observations"
+        params = {
+            'series_id': 'DGS10',  # 10-Year Treasury Rate
+            'api_key': api_key,
+            'sort_order': 'desc',
+            'limit': 1,
+            'file_type': 'json'
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('observations') and len(data['observations']) > 0:
+                # 檢查是否有有效數據
+                value = data['observations'][0]['value']
+                if value != '.':  # FRED 有時會用 '.' 表示缺失數據
+                    rate = float(value)
+                    logging.info(f"當前利率: {rate}%")
                     return rate
+                else:
+                    logging.warning("FRED 返回了缺失數據")
             else:
-                logging.error(f"FRED API 返回錯誤狀態碼: {response.status_code}")
-                
-        except requests.exceptions.RequestException as e:
-            logging.error(f"FRED API 請求失敗: {str(e)}")
-        except (ValueError, KeyError) as e:
-            logging.error(f"解析 FRED 數據失敗: {str(e)}")
-        except Exception as e:
-            logging.error(f"從 FRED 獲取數據時發生未知錯誤: {str(e)}")
-        return None
-
-    # 嘗試從 FRED 獲取數據
-    for attempt in range(max_retries):
-        if attempt > 0:
-            logging.info(f"等待 {base_delay} 秒後進行第 {attempt + 1} 次嘗試...")
-            time.sleep(base_delay)
+                logging.warning("FRED 返回的數據格式不符合預期")
+        else:
+            logging.error(f"FRED API 請求失敗: {response.status_code}")
             
-        rate = _get_rate_from_fred()
-        if rate is not None:
-            return rate
-
-    logging.error("無法從 FRED 獲取利率數據")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"請求異常: {str(e)}")
+    except ValueError as e:
+        logging.error(f"數據解析錯誤: {str(e)}")
+    except Exception as e:
+        logging.error(f"獲取利率時發生未知錯誤: {str(e)}")
+        
     return None
 
-def check_condition(current_rate, target_rate, condition):
+def check_conditions(current_rate, target_rate, condition):
+    """檢查是否達到通知條件"""
     if condition == "greater than or equal to":
         return current_rate >= target_rate
     elif condition == "less than or equal to":
         return current_rate <= target_rate
-    else:
-        logging.error(f"Invalid condition: {condition}")
-        return False
-
-def send_rate_notification(recipient, current_rate, target_rate, condition):
-    try:
-        sender = EmailSender()
-        subject = f"Interest Rate Alert - {current_rate:.2f}%"
-        body = f"""
-        Interest Rate Alert!
-        
-        Current 10-Year Treasury Rate: {current_rate:.2f}%
-        Your Target Rate: {target_rate:.2f}%
-        Condition: {condition}
-        
-        This notification was triggered because the current rate is {condition} your target rate.
-        
-        You can update your preferences at any time through the Interest Rate Monitor interface.
-        """
-        
-        return sender.send_email(recipient, subject, body)
-    
-    except Exception as e:
-        logging.error(f"Error sending rate notification: {str(e)}")
-        return False
+    return False
 
 def main():
-    # Load configuration
-    config = load_config()
-    if not config:
-        return
+    try:
+        # 讀取配置
+        config_path = Path("config.json")
+        if not config_path.exists():
+            logging.error("找不到配置文件 config.json")
+            return
+            
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            
+        # 檢查配置
+        required_fields = ["email", "target_rate", "condition"]
+        for field in required_fields:
+            if field not in config:
+                logging.error(f"配置文件缺少必要字段: {field}")
+                return
+                
+        logging.info(f"目標郵箱: {config['email']}")
+        logging.info(f"目標利率: {config['target_rate']}%")
+        logging.info(f"條件: {config['condition']}")
+        
+        # 獲取當前利率
+        current_rate = get_current_rate()
+        if current_rate is None:
+            logging.error("無法獲取當前利率，監控終止")
+            return
 
-    # Get current rate
-    current_rate = get_current_rate()
-    if current_rate is None:
-        return
+        # 檢查條件
+        condition_met = check_conditions(current_rate, config["target_rate"], config["condition"])
+        logging.info(f"條件是否達成: {condition_met}")
+        
+        if condition_met:
+            # 發送通知
+            try:
+                sender = EmailSender()
+                subject = f"利率監控通知 - 目標條件已達成"
+                body = f"""
+                您好，
 
-    logging.info(f"Current 10-Year Treasury Rate: {current_rate}%")
+                當前利率已達到您設定的條件：
 
-    # Check if conditions are met
-    if check_condition(current_rate, config['target_rate'], config['condition']):
-        logging.info("Target condition met - sending notification")
-        send_rate_notification(
-            config['email'],
-            current_rate,
-            config['target_rate'],
-            config['condition']
-        )
-    else:
-        logging.info("Target condition not met - no notification needed")
+                當前利率：{current_rate}%
+                目標利率：{config['target_rate']}%
+                條件：{config['condition']}
+
+                時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+                此致，
+                利率監控系統
+                """
+                
+                result = sender.send_email(config["email"], subject, body)
+                if result:
+                    logging.info(f"通知郵件已成功發送至 {config['email']}")
+                else:
+                    logging.error("通知郵件發送失敗")
+                    
+            except Exception as e:
+                logging.error(f"發送通知時發生錯誤: {str(e)}")
+        else:
+            logging.info("條件未達成，不發送通知")
+
+    except json.JSONDecodeError as e:
+        logging.error(f"配置文件格式錯誤: {str(e)}")
+    except Exception as e:
+        logging.error(f"監控過程中發生未知錯誤: {str(e)}")
 
 if __name__ == "__main__":
-    main() 
+    logging.info("=== 利率監控系統啟動 ===")
+    main()
+    logging.info("=== 監控完成 ===") 
